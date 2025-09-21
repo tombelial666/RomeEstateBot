@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    container_name: romeestatebot
+    restart: unless-stopped
+    environment:
+      - TIMEZONE=Europe/Amsterdam
+      # включите строки ниже для webhook-режима
+      # - WEBHOOK_URL=https://your.domain.com/telegram/webhook
+      # - WEBHOOK_PATH=/telegram/webhook
+      # - WEBHOOK_SECRET=WEBHOOK_SECRET
+      # - WEBAPP_HOST=0.0.0.0
+      # - WEBAPP_PORT=8080
+    volumes:
+      - ./environment.ini:/app/environment.ini:ro
+      - ./sa.json:/app/sa.json:ro
+      - ./bot.db:/app/bot.db
+    # для long-polling порты не нужны; для webhook добавьте порт и прокси
+    # ports:
+    #   - "8080:8080"
+

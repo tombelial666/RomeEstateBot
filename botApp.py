@@ -7,6 +7,7 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
@@ -19,6 +20,7 @@ from apscheduler.triggers.date import DateTrigger
 
 import gspread
 from google.oauth2.service_account import Credentials
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # -------------------- Загрузка окружения --------------------
 def load_env_file(path: str = "environment.ini"):
@@ -69,12 +71,21 @@ GSHEET_ID = os.getenv("GSHEET_ID", "GOOGLE_SHEET_ID")
 GSHEET_WORKSHEET = os.getenv("GSHEET_WORKSHEET", "Leads")
 GOOGLE_SERVICE_JSON = os.getenv("GOOGLE_SERVICE_JSON", "")  # путь к файлу, либо JSON строка
 
+# Webhook (опционально)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # например, https://your.domain.com/telegram/webhook
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0")
+WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
+
 # -------------------- Логирование --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 logger = logging.getLogger("rome_estate_bot")
+
+from templates import TEMPLATES
 
 # -------------------- SQLite --------------------
 DB_PATH = os.getenv("DB_PATH", "bot.db")
@@ -228,24 +239,19 @@ def followup_keyboard():
 async def on_start(message: Message, bot: Bot):
     upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     await gs_write_new_user(get_user(message.from_user.id))
-    await message.answer(
-        "Приветствуем в Rome Estate!\n\nМы приготовили для вас лучшие инвестиционные проекты на Пхукете.\n"
-        "Чтобы продолжить, подпишитесь на наш канал 👇",
-        reply_markup=greeting_keyboard()
-    )
+    await message.answer(TEMPLATES["greeting"], reply_markup=greeting_keyboard())
 
 @router.callback_query(F.data == "check_sub")
 async def on_check_sub(callback: CallbackQuery, bot: Bot):
     try:
+        # Сообщим пользователю, что проверяем подписку
+        await callback.message.answer(TEMPLATES["checking_subscription"])
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=callback.from_user.id)
         status = getattr(member, "status", None)
         if status in {"creator", "administrator", "member"}:
             update_user_fields(callback.from_user.id, subscribed=1)
             await gs_update_by_chat_id(callback.from_user.id, {"subscribed": True})
-            await callback.message.edit_text(
-                "Отлично ✅ Вы в шаге от волшебной презентации!✨\n"
-                "Теперь напишите слово «Проект», и получите подборку из 30 лучших инвестиционных проектов на Пхукете!💼"
-            )
+            await callback.message.answer(TEMPLATES["subscribed_ok"])
         else:
             await callback.answer("Похоже, вы ещё не подписаны 😔", show_alert=True)
     except Exception as e:
@@ -272,10 +278,7 @@ async def on_project(message: Message, bot: Bot):
         )
         return
 
-    await message.answer(
-        "📂 Ваша подборка готова!\nЭто 30 лучших инвестиционных проектов на Пхукете.\n"
-        "Уверены, что вы найдете то, что ищете! ✨"
-    )
+    await message.answer(TEMPLATES["pdf_sent"])
     await message.answer_document(URLInputFile(PDF_URL, filename="RomeEstate_30_Projects.pdf"))
 
     now_iso = datetime.now(TZ).isoformat()
@@ -307,10 +310,7 @@ async def on_any_message(message: Message):
     })
 
     # Fallback/вопросы — отправим контакт менеджера
-    await message.answer(
-        "Спасибо за ваш вопрос!\nЧтобы получить быстрый ответ — свяжитесь с менеджером 👇",
-        reply_markup=followup_keyboard()
-    )
+    await message.answer(TEMPLATES["fallback_question"], reply_markup=followup_keyboard())
 
 # -------------------- Follow-up --------------------
 def schedule_followup(chat_id: int, initial: bool = False):
@@ -362,8 +362,7 @@ async def async_followup_job(chat_id: int):
         bot = Bot(BOT_TOKEN)
         await bot.send_message(
             chat_id,
-            "Напоминаем о себе 👋\nУ нас для вас всегда открыты лучшие возможности на Пхукете.\n"
-            "Хотите, свяжем вас напрямую с нашим менеджером?👩🏼‍💻",
+            TEMPLATES["followup"],
             reply_markup=followup_keyboard()
         )
         await bot.session.close()
@@ -401,6 +400,57 @@ async def admin_force_followup(message: Message):
     chat_id = int(parts[1])
     schedule_followup(chat_id, initial=False)
     await message.reply(f"Follow-up поставлен для {chat_id}")
+
+# -------------------- Доп. админ-команды --------------------
+@router.message(F.text.startswith("/export_leads"))
+async def admin_export_leads(message: Message):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        return
+    # простой CSV-экспорт текущей таблицы users из SQLite
+    import csv
+    from io import StringIO
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT chat_id, username, first_name, last_interaction, subscribed, last_message, file_sent_at, followup_attempts, manager_contacted FROM users")
+    rows = cur.fetchall()
+    conn.close()
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["chat_id","username","first_name","last_interaction","subscribed","last_message","file_sent","followup_attempts","manager_contacted"])
+    writer.writerows(rows)
+    buf.seek(0)
+    await message.answer_document(document=("leads.csv", buf.getvalue()))
+
+@router.message(F.text.startswith("/manager_contacted"))
+async def admin_manager_contacted(message: Message):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        return
+    parts = message.text.strip().split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.reply("Использование: /manager_contacted <chat_id> [on|off]")
+        return
+    chat_id = int(parts[1])
+    state = True
+    if len(parts) >= 3:
+        state = parts[2].lower() == "on"
+    update_user_fields(chat_id, manager_contacted=1 if state else 0)
+    await gs_update_by_chat_id(chat_id, {"manager_contacted": state})
+    await message.reply(f"manager_contacted={'on' if state else 'off'} для {chat_id}")
+
+@router.message(F.text.startswith("/health"))
+async def admin_health(message: Message):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        return
+    try:
+        bot = Bot(BOT_TOKEN)
+        me = await bot.get_me()
+        await bot.session.close()
+        await message.reply(f"OK: @{me.username}")
+    except Exception as e:
+        await message.reply(f"Health error: {e}")
+
+@router.message(F.text.startswith("/chat_id"))
+async def admin_chat_id(message: Message):
+    await message.reply(f"Ваш chat_id: {message.chat.id}")
 
 # Health-check раз в 60 минут
 def schedule_healthcheck():
@@ -468,7 +518,32 @@ async def main():
     scheduler.start()
     restore_followups()
 
-    await dp.start_polling(Bot(BOT_TOKEN))
+    bot = Bot(BOT_TOKEN)
+
+    # long-polling по умолчанию
+    if not WEBHOOK_URL:
+        await dp.start_polling(bot)
+        return
+
+    # webhook-режим
+    async def on_startup(app: web.Application):
+        try:
+            await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
+            logger.info("Webhook set: %s", WEBHOOK_URL)
+        except Exception as e:
+            logger.exception("Failed to set webhook: %s", e)
+
+    async def on_shutdown(app: web.Application):
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
+
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
+    logger.info("Starting webhook app on %s:%s %s", WEBAPP_HOST, WEBAPP_PORT, WEBHOOK_PATH)
+    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
 
 if __name__ == "__main__":
     try:
