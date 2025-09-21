@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Virtualenv
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Secrets
+sa.json
+environment.ini
+
+# Databases
+*.db
+*.sqlite3
+
+# Env files
+*.env
