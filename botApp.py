@@ -239,6 +239,7 @@ def greeting_keyboard(lang: str = "ru"):
     btns = TEMPLATES.get(lang, TEMPLATES["ru"]) ["buttons"]
     kb.button(text=btns["subscribe"], url=CHANNEL_LINK)
     kb.button(text=btns["check_sub"], callback_data="check_sub")
+    kb.button(text=btns["change_lang"], callback_data="lang_menu")
     return kb.as_markup()
 
 def followup_keyboard(lang: str = "ru"):
@@ -266,6 +267,15 @@ async def on_set_lang(callback: CallbackQuery):
     update_user_fields(callback.from_user.id, last_message=f"_lang:{lang}")
     tmpl = TEMPLATES[lang]
     await callback.message.edit_text(tmpl["greeting"], reply_markup=greeting_keyboard(lang))
+
+@router.callback_query(F.data == "lang_menu")
+async def on_lang_menu(callback: CallbackQuery):
+    # показать меню выбора языка ещё раз
+    kb = InlineKeyboardBuilder()
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["ru"], callback_data="lang:ru")
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["en"], callback_data="lang:en")
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["th"], callback_data="lang:th")
+    await callback.message.edit_text(TEMPLATES["ru"]["choose_lang"], reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "check_sub")
 async def on_check_sub(callback: CallbackQuery, bot: Bot):

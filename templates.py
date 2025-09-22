@@ -31,6 +31,7 @@ TEMPLATES = {
             "check_sub": "Проверить подписку",
             "contact_manager": "Связаться с менеджером",
             "manager": "Менеджер Rome Estate",
+            "change_lang": "Сменить язык",
         },
     },
     "en": {
@@ -65,6 +66,7 @@ TEMPLATES = {
             "check_sub": "Check subscription",
             "contact_manager": "Contact manager",
             "manager": "Rome Estate manager",
+            "change_lang": "Change language",
         },
     },
     "th": {
@@ -99,6 +101,7 @@ TEMPLATES = {
             "check_sub": "ตรวจสอบการติดตาม",
             "contact_manager": "ติดต่อผู้จัดการ",
             "manager": "ผู้จัดการ Rome Estate",
+            "change_lang": "เปลี่ยนภาษา",
         },
     },
 }
