@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import URLInputFile
+from aiogram.types import URLInputFile, BufferedInputFile
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -62,7 +62,8 @@ CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/rome_estate_channel")
 MANAGER_CONTACT = os.getenv("MANAGER_CONTACT", "https://t.me/manager_telegram_or_site")
 
 PDF_URL = os.getenv("PDF_URL", "https://drive.google.com/uc?id=DRIVE_FILE_ID&export=download")
-PROJECT_RE = re.compile(r"(?i)^\s*(?:проек(?:t|т)\w*|prоekt|project)\s*$")
+# Разрешаем русское/латинское написание, а также 'proekt' с латинской/русской 'o'
+PROJECT_RE = re.compile(r"(?i)^\s*(?:проек(?:t|т)\w*|pr[oо]ekt|project)\s*$")
 
 REMINDER_INTERVAL_DAYS = int(os.getenv("REMINDER_INTERVAL_DAYS", "2"))
 REMINDER_MAX_ATTEMPTS = int(os.getenv("REMINDER_MAX_ATTEMPTS", "3"))
@@ -102,9 +103,18 @@ def init_db():
             last_interaction TEXT,
             file_sent_at TEXT,
             followup_attempts INTEGER DEFAULT 0,
-            manager_contacted INTEGER DEFAULT 0
+            manager_contacted INTEGER DEFAULT 0,
+            lang TEXT
         )
     """)
+    # миграция: добавить колонку lang, если её нет
+    try:
+        cur = conn.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "lang" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN lang TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -140,7 +150,7 @@ def get_user(chat_id: int) -> dict | None:
     if not row:
         return None
     keys = ["chat_id", "username", "first_name", "subscribed", "last_message",
-            "last_interaction", "file_sent_at", "followup_attempts", "manager_contacted"]
+            "last_interaction", "file_sent_at", "followup_attempts", "manager_contacted", "lang"]
     return dict(zip(keys, row))
 
 # -------------------- Google Sheets --------------------
@@ -224,34 +234,53 @@ async def gs_update_by_chat_id(chat_id: int, updates: dict):
 router = Router()
 scheduler = AsyncIOScheduler(timezone=str(TZ))
 
-def greeting_keyboard():
+def greeting_keyboard(lang: str = "ru"):
     kb = InlineKeyboardBuilder()
-    kb.button(text="Подписаться на канал Rome Estate", url=CHANNEL_LINK)
-    kb.button(text="Проверить подписку", callback_data="check_sub")
+    btns = TEMPLATES.get(lang, TEMPLATES["ru"]) ["buttons"]
+    kb.button(text=btns["subscribe"], url=CHANNEL_LINK)
+    kb.button(text=btns["check_sub"], callback_data="check_sub")
     return kb.as_markup()
 
-def followup_keyboard():
+def followup_keyboard(lang: str = "ru"):
     kb = InlineKeyboardBuilder()
-    kb.button(text="Связаться с менеджером", url=MANAGER_CONTACT)
+    btns = TEMPLATES.get(lang, TEMPLATES["ru"]) ["buttons"]
+    kb.button(text=btns["contact_manager"], url=MANAGER_CONTACT)
     return kb.as_markup()
 
 @router.message(CommandStart())
 async def on_start(message: Message, bot: Bot):
     upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     await gs_write_new_user(get_user(message.from_user.id))
-    await message.answer(TEMPLATES["greeting"], reply_markup=greeting_keyboard())
+    kb = InlineKeyboardBuilder()
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["ru"], callback_data="lang:ru")
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["en"], callback_data="lang:en")
+    kb.button(text=TEMPLATES["ru"]["lang_buttons"]["th"], callback_data="lang:th")
+    await message.answer(TEMPLATES["ru"]["choose_lang"], reply_markup=kb.as_markup())
+
+@router.callback_query(F.data.startswith("lang:"))
+async def on_set_lang(callback: CallbackQuery):
+    lang = callback.data.split(":",1)[1]
+    if lang not in ("ru","en","th"):
+        lang = "ru"
+    # сохраним в last_message специальный маркер
+    update_user_fields(callback.from_user.id, last_message=f"_lang:{lang}")
+    tmpl = TEMPLATES[lang]
+    await callback.message.edit_text(tmpl["greeting"], reply_markup=greeting_keyboard(lang))
 
 @router.callback_query(F.data == "check_sub")
 async def on_check_sub(callback: CallbackQuery, bot: Bot):
     try:
-        # Сообщим пользователю, что проверяем подписку
-        await callback.message.answer(TEMPLATES["checking_subscription"])
+        lang = "ru"
+        u = get_user(callback.from_user.id)
+        if u and (u.get("last_message") or "").startswith("_lang:"):
+            lang = u["last_message"].split(":",1)[1]
+        await callback.message.answer(TEMPLATES[lang]["checking_subscription"])
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=callback.from_user.id)
         status = getattr(member, "status", None)
         if status in {"creator", "administrator", "member"}:
             update_user_fields(callback.from_user.id, subscribed=1)
             await gs_update_by_chat_id(callback.from_user.id, {"subscribed": True})
-            await callback.message.answer(TEMPLATES["subscribed_ok"])
+            await callback.message.answer(TEMPLATES[lang]["subscribed_ok"])
         else:
             await callback.answer("Похоже, вы ещё не подписаны 😔", show_alert=True)
     except Exception as e:
@@ -278,8 +307,37 @@ async def on_project(message: Message, bot: Bot):
         )
         return
 
-    await message.answer(TEMPLATES["pdf_sent"])
-    await message.answer_document(URLInputFile(PDF_URL, filename="RomeEstate_30_Projects.pdf"))
+    lang = "ru"
+    u = get_user(message.from_user.id)
+    if u:
+        if u.get("lang") in ("ru","en","th"):
+            lang = u["lang"]
+        elif (u.get("last_message") or "").startswith("_lang:"):
+            lang = u["last_message"].split(":",1)[1]
+    await message.answer(TEMPLATES[lang]["pdf_sent"])
+    try:
+        await message.answer_document(URLInputFile(PDF_URL, filename="RomeEstate_30_Projects.pdf"))
+    except Exception as e:
+        logger.exception("Send document via URL failed: %s", e)
+        # Fallback: скачиваем и отправляем как байты
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(PDF_URL) as resp:
+                    content = await resp.read()
+                    if resp.status == 200 and content:
+                        await message.answer_document(BufferedInputFile(content, filename="RomeEstate_30_Projects.pdf"))
+                    else:
+                        await message.answer(
+                            "Не удалось загрузить PDF по ссылке. Свяжитесь с менеджером 👇",
+                            reply_markup=followup_keyboard()
+                        )
+        except Exception:
+            logger.exception("Fallback download+send failed")
+            await message.answer(
+                "Не удалось отправить PDF. Свяжитесь с менеджером 👇",
+                reply_markup=followup_keyboard()
+            )
 
     now_iso = datetime.now(TZ).isoformat()
     update_user_fields(
@@ -310,7 +368,11 @@ async def on_any_message(message: Message):
     })
 
     # Fallback/вопросы — отправим контакт менеджера
-    await message.answer(TEMPLATES["fallback_question"], reply_markup=followup_keyboard())
+    lang = "ru"
+    u = get_user(message.from_user.id)
+    if u and (u.get("last_message") or "").startswith("_lang:"):
+        lang = u["last_message"].split(":",1)[1]
+    await message.answer(TEMPLATES[lang]["fallback_question"], reply_markup=followup_keyboard(lang))
 
 # -------------------- Follow-up --------------------
 def schedule_followup(chat_id: int, initial: bool = False):

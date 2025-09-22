@@ -1,12 +1,11 @@
-version: "3.9"
-
 services:
   bot:
     build: .
-    container_name: romeestatebot
     restart: unless-stopped
     environment:
       - TIMEZONE=Europe/Amsterdam
+      - DB_PATH=/app/bot.db
+      - GOOGLE_SERVICE_JSON=/app/sa.json
       # включите строки ниже для webhook-режима
       # - WEBHOOK_URL=https://your.domain.com/telegram/webhook
       # - WEBHOOK_PATH=/telegram/webhook

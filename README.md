@@ -69,3 +69,30 @@ location /telegram/ {
 - Для проверки подписки бот должен быть админом канала
 - PDF с Google Drive — используйте прямой URL вида `uc?id=...&export=download`
 
+## Тестирование
+
+Запуск всех тестов с покрытием:
+```bash
+pytest
+```
+
+HTML-отчёт покрытия:
+```bash
+pytest --cov=./ --cov-report=html
+# затем откройте htmlcov/index.html
+```
+
+Состав тестов (пирамида):
+- Юнит: БД/regex (`tests/test_db_and_regex.py`), планировщик (`tests/test_followup_scheduler.py`), PDF fallback (`tests/test_pdf_fallback.py`), Sheets-логирование со стабами (`tests/test_sheets_logging.py`), healthcheck (`tests/test_admin_health.py`).
+- Интеграция: основной флоу `/start → check_sub → проект` (`tests/test_integration_flow.py`).
+- E2E (smoke): проверка хендлеров (`tests/test_e2e_stub.py`).
+
+Матрица трассировки (раздел → код → тест):
+- Greeting → `on_start` → `tests/test_integration_flow.py`
+- SubscriptionCheck → `on_check_sub` → `tests/test_integration_flow.py`
+- Commands/Project → `on_project` → `tests/test_integration_flow.py`, `tests/test_pdf_fallback.py`
+- Logging/Sheets → `gs_write_new_user`, `gs_update_by_chat_id` → `tests/test_sheets_logging.py`
+- FollowUp → `schedule_followup`, `async_followup_job` (частично) → `tests/test_followup_scheduler.py`
+- Monitoring/Health → `async_healthcheck` → `tests/test_admin_health.py`
+- Fallbacks → `on_any_message` (покрыть легко при необходимости) → можно добавить тест по аналогии с интеграцией
+
